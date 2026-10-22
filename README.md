@@ -734,6 +734,20 @@ downloads its weights on first use. This fallback does not require downloading
 ChestX-ray14 or training locally. The displayed probabilities and
 visualizations are for research only and are not clinical diagnoses.
 
+## Vercel static preview
+
+The `vercel-static/` folder contains a static image-preview page for Vercel.
+It does not perform inference or show disease scores. The Python/PyTorch model
+needs a separate inference host; do not present the static preview as an AI
+diagnostic app.
+
+To deploy the static preview from GitHub:
+
+1. Import this repository in the Vercel dashboard.
+2. Set **Root Directory** to `vercel-static`.
+3. Select **Other** as the framework preset and leave the build command empty.
+4. Deploy. The static page is served from `vercel-static/index.html`.
+
 ---
 
 # 23. Grad-CAM Process
