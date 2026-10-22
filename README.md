@@ -715,6 +715,27 @@ gradcam_hernia.png
 
 ---
 
+# 22a. Image Upload App
+
+Start the interactive app:
+
+```bash
+streamlit run app.py
+```
+
+Upload a PNG or JPEG chest X-ray to see a graph of all 14 predicted disease
+scores, a Grad-CAM overlay, and a short explanation of the selected model
+output. The explanation includes the model's rank and score, general features
+clinicians assess for that finding, and a clear note that the heatmap does not
+confirm those features or establish a diagnosis. If a trained
+`pulmoNeXt_best.pth` checkpoint is present, the app uses it. Otherwise, the app
+uses the public TorchXRayVision `densenet121-res224-all` pretrained model and
+downloads its weights on first use. This fallback does not require downloading
+ChestX-ray14 or training locally. The displayed probabilities and
+visualizations are for research only and are not clinical diagnoses.
+
+---
+
 # 23. Grad-CAM Process
 
 The Grad-CAM implementation performs:
