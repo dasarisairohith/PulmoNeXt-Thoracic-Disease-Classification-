@@ -1,0 +1,7 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "buildCommand": "node -e \"console.log('No build required for static preview')\"",
+  "installCommand": "node -e \"console.log('No dependencies required for static preview')\"",
+  "outputDirectory": "vercel-static"
+}

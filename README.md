@@ -741,12 +741,15 @@ It does not perform inference or show disease scores. The Python/PyTorch model
 needs a separate inference host; do not present the static preview as an AI
 diagnostic app.
 
+The root `vercel.json` selects Vercel's static preset and serves this folder,
+preventing Vercel from trying to run the root Streamlit `app.py` as a Python
+Function.
+
 To deploy the static preview from GitHub:
 
 1. Import this repository in the Vercel dashboard.
-2. Set **Root Directory** to `vercel-static`.
-3. Select **Other** as the framework preset and leave the build command empty.
-4. Deploy. The static page is served from `vercel-static/index.html`.
+2. Keep the **Root Directory** set to the repository root.
+3. Deploy. Vercel uses `vercel.json` and serves `vercel-static/index.html`.
 
 ---
 
