@@ -16,6 +16,7 @@ BETA = 0.9999
 GAMMA = 2.0
 NUM_WORKERS = 2
 SEED = 42
+VALIDATION_FRACTION = 0.1
 
 CLASSES = [
     "Atelectasis", "Cardiomegaly", "Consolidation", "Edema",

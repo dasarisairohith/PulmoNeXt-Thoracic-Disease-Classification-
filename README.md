@@ -486,15 +486,20 @@ python train.py
 
 The training script:
 
-1. Loads the dataset.
-2. Reads the class labels.
-3. Calculates class frequencies.
-4. Creates the Class-Balanced Focal Loss.
-5. Loads pretrained ConvNeXt-Tiny.
-6. Replaces the classification head.
-7. Trains the network.
-8. Evaluates validation performance.
-9. Saves the best checkpoint.
+1. Loads images from the official `train_val_list.txt`.
+2. Splits that list into train and validation subsets by patient (90%/10% by
+   default).
+3. Calculates class frequencies from metadata without loading image pixels.
+4. Applies Class-Balanced Focal Loss weights to positive labels, avoiding
+   rare-class weights amplifying the many negative labels.
+5. Fine-tunes the pretrained ConvNeXt-Tiny backbone with a lower learning rate
+   than its new classification head.
+6. Selects and saves the checkpoint with the best validation macro PR-AUC.
+
+The official `test_list.txt` is not used for training or checkpoint selection. Run
+`python evaluate.py` only after training to evaluate the saved checkpoint on that
+held-out test set. Training cannot establish an accuracy improvement until it is
+run on the configured ChestX-ray14 data and compared with a baseline.
 
 ---
 
@@ -510,6 +515,7 @@ Learning rate    : 2e-4
 Weight decay     : 1e-4
 Focal gamma      : 2.0
 Class beta       : 0.9999
+Validation split : 10% of train_val_list, grouped by patient
 Seed             : 42
 ```
 
@@ -562,6 +568,7 @@ The checkpoint contains:
 ```text
 model weights
 class information
+best epoch and validation macro PR-AUC
 ```
 
 The checkpoint is used by both:

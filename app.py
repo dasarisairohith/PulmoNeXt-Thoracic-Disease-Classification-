@@ -94,7 +94,14 @@ def build_dip_concept_stages(image):
     demo_input = image.convert("L")
     demo_input.thumbnail((512, 512), Image.Resampling.LANCZOS)
 
-    denoised = demo_input.filter(ImageFilter.MedianFilter(size=3))
+    noisy_pixels = np.asarray(demo_input, dtype=np.uint8).copy()
+    noise_rng = np.random.default_rng(42)
+    noise_mask = noise_rng.random(noisy_pixels.shape) < 0.04
+    salt_mask = noise_rng.random(noisy_pixels.shape) < 0.5
+    noisy_pixels[noise_mask & salt_mask] = 255
+    noisy_pixels[noise_mask & ~salt_mask] = 0
+    noisy_image = Image.fromarray(noisy_pixels)
+    denoised = noisy_image.filter(ImageFilter.MedianFilter(size=3))
     contrast_stretched = ImageOps.autocontrast(denoised, cutoff=1)
     equalized = ImageOps.equalize(contrast_stretched)
 
@@ -125,7 +132,15 @@ def build_dip_concept_stages(image):
         )
     threshold = int(np.argmax(between_class_variance))
     segmented = equalized.point(lambda value: 255 if value > threshold else 0)
-    opened = segmented.filter(ImageFilter.MinFilter(size=3)).filter(
+    opening_input_pixels = np.asarray(segmented, dtype=np.uint8).copy()
+    speck_rng = np.random.default_rng(7)
+    speck_mask = (
+        (speck_rng.random(opening_input_pixels.shape) < 0.005)
+        & (opening_input_pixels == 0)
+    )
+    opening_input_pixels[speck_mask] = 255
+    opening_input = Image.fromarray(opening_input_pixels)
+    opened = opening_input.filter(ImageFilter.MinFilter(size=3)).filter(
         ImageFilter.MaxFilter(size=3)
     )
     edges = ImageOps.autocontrast(
@@ -140,10 +155,16 @@ def build_dip_concept_stages(image):
             demo_input,
         ),
         (
+            "Synthetic salt-and-pepper noise",
+            noisy_image,
+            "For demonstration only, add reproducible black and white speckles to 4% of pixels so noise removal is visible. The uploaded image is not changed.",
+            demo_input,
+        ),
+        (
             "Noise reduction",
             denoised,
-            "Apply a 3 × 3 median filter to reduce isolated pixel noise.",
-            demo_input,
+            "Apply a 3 × 3 median filter to remove the synthetic speckles while preserving larger structures.",
+            noisy_image,
         ),
         (
             "Contrast stretching",
@@ -164,10 +185,16 @@ def build_dip_concept_stages(image):
             equalized,
         ),
         (
+            "Morphology input with specks",
+            opening_input,
+            "For demonstration only, add isolated white pixels to the binary mask so the opening operation's cleanup effect is visible.",
+            segmented,
+        ),
+        (
             "Morphological opening",
             opened,
-            "Erode then dilate the binary mask to remove small foreground specks.",
-            segmented,
+            "Erode, then dilate, the binary mask using a 3 × 3 square structuring element; isolated specks are removed while larger regions remain.",
+            opening_input,
         ),
         (
             "Edge detection",
