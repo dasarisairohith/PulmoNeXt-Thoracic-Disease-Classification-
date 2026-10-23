@@ -8,9 +8,9 @@ import numpy as np
 import requests
 import streamlit as st
 import torch
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageFilter, ImageOps, UnidentifiedImageError
 
-from config import CHECKPOINT, CLASSES
+from config import CHECKPOINT, CLASSES, IMAGE_SIZE
 from dataset import build_transform
 from utils import get_device
 
@@ -79,23 +79,199 @@ def load_model(checkpoint_path: Path):
     return model, device, model_type, model_labels
 
 
+def _preview_image(values, minimum, maximum):
+    pixels = np.clip((values - minimum) * (255.0 / (maximum - minimum)), 0, 255)
+    return Image.fromarray(pixels.astype(np.uint8))
+
+
+def _false_color_image(values, minimum, maximum):
+    scaled = np.clip((values - minimum) / (maximum - minimum), 0, 1)
+    colors = plt.get_cmap("turbo")(scaled)[..., :3]
+    return Image.fromarray(np.uint8(colors * 255))
+
+
+def build_dip_concept_stages(image):
+    demo_input = image.convert("L")
+    demo_input.thumbnail((512, 512), Image.Resampling.LANCZOS)
+
+    denoised = demo_input.filter(ImageFilter.MedianFilter(size=3))
+    contrast_stretched = ImageOps.autocontrast(denoised, cutoff=1)
+    equalized = ImageOps.equalize(contrast_stretched)
+
+    histogram = np.histogram(
+        np.asarray(equalized, dtype=np.uint8),
+        bins=256,
+        range=(0, 256),
+    )[0]
+    pixel_count = histogram.sum()
+    total_intensity = np.dot(np.arange(256), histogram)
+    background_count = 0
+    background_sum = 0.0
+    between_class_variance = np.zeros(256, dtype=np.float64)
+    for threshold in range(256):
+        background_count += histogram[threshold]
+        if background_count == 0:
+            continue
+        foreground_count = pixel_count - background_count
+        if foreground_count == 0:
+            break
+        background_sum += threshold * histogram[threshold]
+        background_mean = background_sum / background_count
+        foreground_mean = (total_intensity - background_sum) / foreground_count
+        between_class_variance[threshold] = (
+            background_count
+            * foreground_count
+            * (background_mean - foreground_mean) ** 2
+        )
+    threshold = int(np.argmax(between_class_variance))
+    segmented = equalized.point(lambda value: 255 if value > threshold else 0)
+    opened = segmented.filter(ImageFilter.MinFilter(size=3)).filter(
+        ImageFilter.MaxFilter(size=3)
+    )
+    edges = ImageOps.autocontrast(
+        equalized.filter(ImageFilter.FIND_EDGES)
+    )
+
+    return [
+        (
+            "Grayscale conversion",
+            demo_input,
+            "Convert the image to one intensity channel.",
+            demo_input,
+        ),
+        (
+            "Noise reduction",
+            denoised,
+            "Apply a 3 × 3 median filter to reduce isolated pixel noise.",
+            demo_input,
+        ),
+        (
+            "Contrast stretching",
+            contrast_stretched,
+            "Expand the useful intensity range using 1% tail clipping.",
+            denoised,
+        ),
+        (
+            "Histogram equalization",
+            equalized,
+            "Redistribute intensity values to make contrast changes visible.",
+            contrast_stretched,
+        ),
+        (
+            "Threshold segmentation",
+            segmented,
+            f"Separate dark and bright regions with Otsu's automatically selected threshold ({threshold}).",
+            equalized,
+        ),
+        (
+            "Morphological opening",
+            opened,
+            "Erode then dilate the binary mask to remove small foreground specks.",
+            segmented,
+        ),
+        (
+            "Edge detection",
+            edges,
+            "Highlight intensity boundaries using a gradient-based edge filter on the enhanced grayscale image.",
+            equalized,
+        ),
+    ]
+
+
 def prepare_input(image, model_type, device):
+    stages = [("Input image", image, "Uploaded chest X-ray.", None)]
+
     if model_type == "pulmonext":
         tensor = build_transform(train=False)(image)
+        from torchvision import transforms
+
+        resize = transforms.Resize((IMAGE_SIZE, IMAGE_SIZE))
+        to_grayscale = transforms.Grayscale(num_output_channels=3)
+        resized = resize(image)
+        grayscale_rgb = to_grayscale(resized)
+        pixel_tensor = transforms.ToTensor()(grayscale_rgb)
+        normalized_values = tensor.mean(dim=0).numpy()
+        stages.extend(
+            [
+                (
+                    "Resize",
+                    resized,
+                    f"Resize to {IMAGE_SIZE} × {IMAGE_SIZE} using the training transform.",
+                    image,
+                ),
+                (
+                    "Grayscale",
+                    grayscale_rgb,
+                    "Convert to grayscale and replicate into the model's three channels. Little visible change is expected for an X-ray.",
+                    resized,
+                ),
+                (
+                    "Tensor conversion",
+                    Image.fromarray(pixel_tensor.permute(1, 2, 0).mul(255).byte().numpy()),
+                    "Convert pixels to a 3 × 224 × 224 tensor in [0, 1]; the displayed image looks unchanged because this step changes data format.",
+                    grayscale_rgb,
+                ),
+                (
+                    "ImageNet normalization",
+                    _false_color_image(normalized_values, -3, 3),
+                    "False-color view of channel-averaged normalized values, clipped to [-3, 3]. The model receives three-channel normalized values, not these colors.",
+                    Image.fromarray(pixel_tensor.permute(1, 2, 0).mul(255).byte().numpy()),
+                ),
+            ]
+        )
     else:
         import torchxrayvision as xrv
-        from torchvision import transforms
 
         grayscale = np.asarray(image.convert("L"), dtype=np.float32)
         normalized = xrv.datasets.normalize(grayscale, 255)[None, ...]
-        transform = transforms.Compose(
+        cropped = xrv.datasets.XRayCenterCrop()(normalized)
+        resized = xrv.datasets.XRayResizer(IMAGE_SIZE)(cropped)
+        tensor = torch.from_numpy(resized)
+        stages.extend(
             [
-                xrv.datasets.XRayCenterCrop(),
-                xrv.datasets.XRayResizer(224),
+                (
+                    "Grayscale",
+                    Image.fromarray(grayscale.astype(np.uint8)),
+                    "Convert RGB pixels to one intensity channel. Little visible change is expected for an X-ray that is already grayscale.",
+                    image,
+                ),
+                (
+                    "Intensity normalization",
+                    _false_color_image(normalized[0], -1024, 1024),
+                    "False-color view of values scaled to [-1024, 1024]. The model still receives single-channel numeric values, not these colors.",
+                    Image.fromarray(grayscale.astype(np.uint8)),
+                ),
+                (
+                    "Center crop",
+                    _preview_image(cropped[0], -1024, 1024),
+                    "Remove the side margins to make a centered square. The crop area is outlined in the before image.",
+                    None,
+                ),
+                (
+                    "Resize",
+                    _preview_image(resized[0], -1024, 1024),
+                    f"Resample to {IMAGE_SIZE} × {IMAGE_SIZE}; the model receives this lower-resolution tensor.",
+                    _preview_image(cropped[0], -1024, 1024),
+                ),
             ]
         )
-        tensor = torch.from_numpy(transform(normalized))
-    return tensor.unsqueeze(0).to(device)
+        crop_size = min(grayscale.shape)
+        left = grayscale.shape[1] // 2 - crop_size // 2
+        top = grayscale.shape[0] // 2 - crop_size // 2
+        crop_outline = Image.fromarray(grayscale.astype(np.uint8)).convert("RGB")
+        drawing = ImageDraw.Draw(crop_outline)
+        drawing.rectangle(
+            (left, top, left + crop_size - 1, top + crop_size - 1),
+            outline=(255, 40, 40),
+            width=max(2, min(grayscale.shape) // 250),
+        )
+        stages[3] = (
+            stages[3][0],
+            stages[3][1],
+            stages[3][2],
+            crop_outline,
+        )
+    return tensor.unsqueeze(0).to(device), stages
 
 
 def make_gradcam(model, image_tensor, class_index, image, model_type):
@@ -194,7 +370,81 @@ def main():
         )
         return
 
-    image_tensor = prepare_input(image, model_type, device)
+    image_tensor, dip_stages = prepare_input(image, model_type, device)
+    st.subheader("Image processing workflow")
+    st.caption(
+        "Follow each stage in order. The final stage is the tensor passed to the model."
+    )
+    total_steps = len(dip_stages)
+    for step_number, (title, stage_image, description, before_image) in enumerate(
+        dip_stages,
+        start=1,
+    ):
+        with st.container(border=True):
+            st.markdown(f"**Step {step_number} of {total_steps}: {title}**")
+            st.caption(f"{description} · Stage size: {stage_image.width} × {stage_image.height}px")
+            if before_image is None:
+                preview = stage_image.copy()
+                preview.thumbnail((512, 512), Image.Resampling.LANCZOS)
+                st.image(
+                    preview,
+                    width=512,
+                    alt=f"Step {step_number}: {title} chest X-ray processing stage",
+                )
+            else:
+                before_column, after_column = st.columns(2)
+                for column, label, source_image in (
+                    (before_column, "Before", before_image),
+                    (after_column, "After", stage_image),
+                ):
+                    with column:
+                        st.markdown(f"_{label}_")
+                        preview = source_image.copy()
+                        if title == "Resize" and label == "After":
+                            preview = preview.resize(
+                                (IMAGE_SIZE * 3, IMAGE_SIZE * 3),
+                                Image.Resampling.NEAREST,
+                            )
+                        else:
+                            preview.thumbnail((512, 512), Image.Resampling.LANCZOS)
+                        st.image(
+                            preview,
+                            width="stretch",
+                            alt=f"Step {step_number} {label.lower()} view for {title}",
+                        )
+
+    st.subheader("Classic DIP concepts")
+    st.caption(
+        "An educational image-processing sequence: grayscale → denoising → "
+        "contrast enhancement → segmentation → morphology → edges."
+    )
+    st.info(
+        "These demonstration operations are separate from the model pipeline; "
+        "they do not change the image used for prediction."
+    )
+    concept_stages = build_dip_concept_stages(image)
+    for step_number, (title, stage_image, description, before_image) in enumerate(
+        concept_stages,
+        start=1,
+    ):
+        with st.container(border=True):
+            st.markdown(
+                f"**DIP step {step_number} of {len(concept_stages)}: {title}**"
+            )
+            st.caption(description)
+            before_column, after_column = st.columns(2)
+            for column, label, source_image in (
+                (before_column, "Before", before_image),
+                (after_column, "After", stage_image),
+            ):
+                with column:
+                    st.markdown(f"_{label}_")
+                    st.image(
+                        source_image,
+                        width="stretch",
+                        alt=f"DIP step {step_number} {label.lower()} view for {title}",
+                    )
+
     with torch.no_grad():
         outputs = model(image_tensor)[0].cpu().numpy()
 
@@ -224,7 +474,12 @@ def main():
 
     image_column, chart_column = st.columns([1, 1])
     with image_column:
-        st.image(image, caption="Uploaded X-ray", use_container_width=True)
+        st.image(
+            image,
+            caption="Uploaded X-ray",
+            width="stretch",
+            alt="Uploaded chest X-ray",
+        )
     with chart_column:
         st.subheader("Predicted disease probabilities")
         figure, axis = plt.subplots(figsize=(8, 6))
@@ -234,50 +489,52 @@ def main():
         axis.set_ylabel("Disease class")
         axis.grid(axis="x", alpha=0.25)
         figure.tight_layout()
-        st.pyplot(figure, clear_figure=True)
+        st.pyplot(
+            figure,
+            clear_figure=True,
+            alt="Bar chart of model scores for 14 chest X-ray disease classes",
+        )
         plt.close(figure)
 
-    selected_class = st.selectbox(
-        "Grad-CAM class",
-        class_names,
-        index=0,
-    )
-    model_label = (
-        "Pleural_Thickening"
-        if selected_class == "Pleural Thickening"
-        and model_type == "torchxrayvision"
-        else selected_class
-    )
-    class_index = model_labels.index(model_label)
-    try:
-        heatmap = make_gradcam(
-            model,
-            image_tensor,
-            class_index,
-            image,
-            model_type,
+    if st.toggle("Generate Grad-CAM explanation", value=False):
+        selected_class = st.selectbox("Grad-CAM class", class_names, index=0)
+        model_label = (
+            "Pleural_Thickening"
+            if selected_class == "Pleural Thickening"
+            and model_type == "torchxrayvision"
+            else selected_class
         )
-    except (RuntimeError, IndexError) as error:
-        st.error(f"Could not generate the Grad-CAM visualization: {error}")
-        return
+        class_index = model_labels.index(model_label)
+        try:
+            heatmap = make_gradcam(
+                model,
+                image_tensor,
+                class_index,
+                image,
+                model_type,
+            )
+        except (RuntimeError, IndexError) as error:
+            st.error(f"Could not generate the Grad-CAM visualization: {error}")
+            return
 
-    overlay = Image.blend(image, heatmap.convert("RGB"), alpha=0.4)
-    st.subheader(f"Grad-CAM: {selected_class}")
-    st.image(
-        overlay,
-        caption=(
-            "Highlighted regions indicate image areas that influenced this "
-            "model output; they do not prove a disease or identify a specific sign."
-        ),
-        use_container_width=True,
-    )
-    st.subheader(f"Why did the model flag {selected_class}?")
-    st.markdown(describe_model_result(selected_class, scores_by_class))
-    st.caption(
-        "The score is a model output, not the chance that a patient has the disease. "
-        "Only a qualified clinician can interpret a chest X-ray with the patient's "
-        "history and other tests."
-    )
+        overlay = Image.blend(image, heatmap.convert("RGB"), alpha=0.4)
+        st.subheader(f"Grad-CAM: {selected_class}")
+        st.image(
+            overlay,
+            caption=(
+                "Highlighted regions indicate image areas that influenced this "
+                "model output; they do not prove a disease or identify a specific sign."
+            ),
+            width="stretch",
+            alt="Grad-CAM heatmap overlay on the uploaded chest X-ray",
+        )
+        st.subheader(f"Why did the model flag {selected_class}?")
+        st.markdown(describe_model_result(selected_class, scores_by_class))
+        st.caption(
+            "The score is a model output, not the chance that a patient has the disease. "
+            "Only a qualified clinician can interpret a chest X-ray with the patient's "
+            "history and other tests."
+        )
 
 
 if __name__ == "__main__":
